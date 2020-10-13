@@ -1,4 +1,6 @@
-@Library('pipeline-library-gy')_
+library identifier: 'custom-lib@master', retriever: modernSCM(
+  [$class: 'GitSCMSource',
+   remote: 'git@https://github.com/mkthakral/jenkins-gy.git'])
 
 node{
     stage('StopHybris') {
