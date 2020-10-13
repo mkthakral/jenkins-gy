@@ -2,7 +2,7 @@ package com.gy
 import com.gy.utility
 
 def stopServer(String environment) {
-    String osName = new utility().getgetOS();
+    String osName = new utility().getOS();
     println "OS Name: " + osName
 
     Properties props = new Properties()
