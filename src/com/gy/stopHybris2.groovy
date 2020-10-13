@@ -6,7 +6,7 @@ def stopServer(String environment) {
     println "OS Name: " + osName
 
     Properties props = new Properties()
-    File propsFile = new File('conf/' + environment + '.properties')
+    File propsFile = new File('./conf/' + environment + '.properties')
     props.load(propsFile.newDataInputStream())
 
     println props.getProperty('hybris-workspace')
