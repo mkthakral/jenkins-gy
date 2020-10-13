@@ -7,8 +7,8 @@ def stopServer(String environment) {
 
     def propFileContent = libraryResource environment + '.properties'
     println propFileContent
-    def props = readProperties text: propFileContent
-    println props['hybris-workspace']
+    def propertyFile = readProperties text: propFileContent
+    println propertyFile['hybris-workspace']
 
     Properties props = new Properties()
     File propsFile = new File('./conf/' + environment + '.properties')
