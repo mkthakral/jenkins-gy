@@ -1,4 +1,4 @@
-import com.gy.stopHybris
+import com.gy.stopHybris2
 
 def call(Map params) {
     def builder = new stopHybris2();
