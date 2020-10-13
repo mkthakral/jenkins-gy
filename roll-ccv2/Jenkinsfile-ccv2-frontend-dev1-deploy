@@ -1,0 +1,189 @@
+pipeline {
+        agent {
+            node {
+            label 'pgdev1_1905'
+                }
+            }
+
+   options {
+      buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '25', numToKeepStr: '25'))
+      ansiColor('gnome-terminal')
+      disableConcurrentBuilds()
+    }
+    
+    environment {
+          CODE_PATH="/data/"
+          EMAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com,Goodyear_MSO_L2_PBS_TEAM_IND@publicissapient.com, jaideep.singh@publicissapient.com, rahul.gupta5@publicissapient.com'
+          API_DEV_URL = 'https://dev.rollbygoodyear.com/gywebservices/v2'
+      }
+
+  parameters {
+      string(defaultValue: 'BRANCH_NAME', description: 'Frontend Code Branch/TAG Name for Checkout', name: 'FRONTEND_BRANCH')
+      booleanParam(defaultValue: false, description: 'Select if you just want to do frontend deployment', name: 'NODE_DEPLOY')
+      booleanParam(defaultValue: false, description: 'Select if you want to update Nginx Config. This is done by chef', name: 'NGINX_UPDATE')
+  }    
+
+    stages {
+                    stage ('Checkout Frontend Code') {
+                        when {
+          expression { return NODE_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+                }
+          steps {
+              sh 'printf "\\e[35mFrontend Code Checkout...\\e[0m\\n"'
+              dir("${env.WORKSPACE}/roll-frontend") {
+
+            echo "====== Current WORKSPACE Directory is ${env.WORKSPACE} ======="
+            echo "============== GIT Frontend Source Code : ${env.FRONTEND_BRANCH} =============="
+            checkout(
+              [
+                $class: 'GitSCM',
+                branches: [[name: 'origin/${FRONTEND_BRANCH}']],
+                doGenerateSubmoduleConfigurations: false,
+                extensions: [
+                  [$class: 'CheckoutOption', timeout: 120]
+                  ],
+                  submoduleCfg: [],
+                  userRemoteConfigs: [
+                    [
+                      credentialsId: 'gitlab',
+                      url: 'https://gitlab.digitas.com/goodyear/roll-frontend.git'
+                      ]
+                    ]
+                  ],
+                )
+            }
+          }
+      }
+
+    stage ('Stop Nginx') {
+          steps {
+              echo "====== Stop Nginx if its running.. Required to take the server out of Load ======"          
+                sh '''
+                SERVICE="nginx"
+                if pgrep -x "$SERVICE" >/dev/null
+                    then
+                echo "$SERVICE is running.. lets Stop it"
+                systemctl stop nginx
+                    else
+                echo "$SERVICE stopped" 
+                fi
+               '''
+            }
+          }
+          
+        stage ('Update Nginx/System config by chef') {
+                    when {
+          expression { return NGINX_UPDATE ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+                }
+          steps {
+              echo "====== Update any NGINX or systems specific configurations ======"          
+                sh '''
+                chef-client --force-formatter
+               '''
+            }
+          }
+
+        stage ('Frontend Code copy') {
+            when {
+          expression { return NODE_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+                }
+          steps {
+              echo "====== Lets copy the frontend code ======"          
+                sh '''
+                rm -rf $WORKSPACE/roll-frontend/.git
+                rm -rf $WORKSPACE/roll-frontend/node_modules
+                rsync -a "$WORKSPACE/roll-frontend" ${CODE_PATH}/
+                chown -R root.root ${CODE_PATH}/roll-frontend
+               '''
+            }
+          }
+
+     stage ('Check PM2') {
+            when {
+          expression { return NODE_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+                }
+          steps {
+              echo "====== Checking if PM2 is installed and if not installed then do the installation ======"          
+                sh '''
+                FILE=/bin/pm2
+                if [ -f "$FILE" ]; then
+                    echo "$FILE exists"
+                else
+                echo "install pm2 globally"
+                npm install pm2 -g
+                fi
+               '''
+            }
+          }
+
+    stage ('NPM BUILD') {
+           when {
+          expression { return NODE_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+                }
+          steps {
+              echo "====== Running npm build ======"          
+                sh '''
+                pushd ${CODE_PATH}/roll-frontend
+                /root/.nvm/versions/node/v12.18.3/bin/npm install
+                API_URL=${API_DEV_URL} NEW_RELIC_ENV='development' NODE_ENV='development' /root/.nvm/versions/node/v12.18.3/bin/npm run build
+                popd
+               '''
+            }
+          }
+    
+    stage ('PM2 App Start') {
+           when {
+          expression { return NODE_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+                }
+          steps {
+              echo "====== Starting the node application ======"          
+                sh '''
+                pushd ${CODE_PATH}/roll-frontend
+                /bin/pm2 restart ecosystem.config.js --env development
+                popd
+               '''
+            }
+          }
+
+    stage ('Start Nginx') {
+          steps {
+              echo "====== Start Nginx Service  ======"          
+                sh '''
+                SERVICE="nginx"
+                if pgrep -x "$SERVICE" >/dev/null
+                    then
+                echo "$SERVICE is running.. I am Good"
+                    else
+                echo "$SERVICE stopped. Lets start it..."
+                  systemctl start nginx
+                fi
+               '''
+            }
+          }
+
+    }
+
+    post {
+      always {
+       emailext attachLog: true, body: '${JELLY_SCRIPT,template="static-analysis"}', mimeType: 'text/html', recipientProviders: [developers(), culprits(), brokenTestsSuspects(), upstreamDevelopers()], subject: 'Build | $PROJECT_NAME | $BUILD_NUMBER | $BUILD_STATUS ', to: "$EMAIL_RECIPIENTS"
+      script {
+        DATE_TAG = java.time.LocalDate.now()
+        DATETIME_TAG = java.time.LocalDateTime.now()
+          }
+          sh "echo ${DATETIME_TAG}"
+        sh script: "echo 'date=${DATETIME_TAG} build_no=${BUILD_ID} Job_name=_${env.JOB_NAME} build_status=${currentBuild.currentResult}' >> /tmp/file.txt"
+ 
+  }
+
+  unstable {
+      office365ConnectorSend color: "#F8C471", message: "Build Unstable ${JOB_NAME} ${BUILD_NUMBER}", status: "unstable", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+  }
+  failure {
+      office365ConnectorSend color: "#CB4335", message: "Build Failed ${JOB_NAME} ${BUILD_NUMBER}", status: "failure", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+  }
+  success {
+      office365ConnectorSend color: '#1D8348', message: "Build Success ${JOB_NAME} ${BUILD_NUMBER}", status: "success", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+  }
+}
+
+}

@@ -1,0 +1,105 @@
+pipeline {
+        agent {
+                  node {
+                    label 'master'
+                      }
+                }
+      options {
+    buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '15', numToKeepStr: '15'))
+    ansiColor('xterm')
+    disableConcurrentBuilds()
+  }
+  
+  
+  environment {
+    MAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com,Goodyear_MSO_L2_PBS_TEAM_IND@publicissapient.com, jaideep.singh@publicissapient.com, rahul.gupta5@publicissapient.com'
+    BUILDNUMFILE = '/tmp/buildnumber.txt'
+    DEPLOY_NUM_PROD = '/tmp/deploymentcodeprod.txt'
+  }
+  
+
+    parameters {
+      string(defaultValue: 'BUILD_NUMBER', description: 'Hybris Build Approved for Production', name: 'HYBRIS_BUILD_NUM')
+      choice choices: ['NONE', 'UPDATE'], description: 'Select the database Update mode for DEVELOPMENT. (i) NONE -> No migration required: Database isn’t altered and no data is imported. (ii) UPDATE -> Migrate data: Database schema is migrated and data is imported.', name: 'DATABASE_UPDATE_MODE'
+      choice choices: ['ROLLING_UPDATE', 'RECREATE'], description: 'Selet the Deployment Strategy. (1) Rolling update creates an additional deployment alongside the primary one, routes traffic to it and finally removes the previous one. This way, your site is always available. (2) 1Recreate shuts down the running deployment and creates a new one based on a selected build. The site is unavailable to your customers during this time.', name: 'DEPLOYMENT_STRATEGY'
+  }
+
+    stages {
+          stage('Approval') {
+            // no agent, so executors are not used up when waiting for approvals
+            agent none
+            steps {
+                script {
+                    def deploymentDelay = input id: 'Deploy', message: 'Deploy to production?', submitter: 'mayuresh.bhardwaj,skumar', parameters: [choice(choices: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24'], description: 'Hours to delay deployment?', name: 'deploymentDelay')]
+                    sleep time: deploymentDelay.toInteger(), unit: 'HOURS'
+                }
+            }
+        }
+
+      stage ('Deploy On CCV2 PRODUCTION'){
+        steps {
+          sh 'printf "\\e[35mLets Check Hybris Code Build Status on SAP CLOUD...\\e[0m\\n"'
+          withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+          sh '''
+         # HYBRIS_BUILD_NUM=`cat ${BUILDNUMFILE} | awk -F'"' '{print $8}'`
+          /usr/bin/curl -s --location --request POST 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/deployments' --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' --data '{ "buildCode": "'${HYBRIS_BUILD_NUM}'", "databaseUpdateMode": "'${DATABASE_UPDATE_MODE}'", "environmentCode": "p1", "strategy": "'${DEPLOYMENT_STRATEGY}'" }' >${DEPLOY_NUM_PROD}
+          '''
+          }
+        }
+    }
+
+          stage ('Production Deployment Progress') {
+        steps {
+          sh 'printf "\\e[35mLets Deploy Hybris Code on CCV2 Production Environment...\\e[0m\\n"'
+          withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+          sh '''
+          while true
+            do
+            DEPLOYNUM=`cat ${DEPLOY_NUM_PROD} | awk -F'"' '{print $8}'`
+            DEPLOY_STATUS=`/usr/bin/curl -s --location --request GET 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/deployments/'${DEPLOYNUM}'/progress' --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' | awk -F'"' '{print $12}'`
+              if [ "$DEPLOY_STATUS" = "DEPLOYING" ];
+                  then
+                echo "Deployment to Production Environment is STARTED and IN-PROGRESS"
+              elif [ "$DEPLOY_STATUS" = "FAIL" ] || [ -z "$DEPLOY_STATUS"]
+                  then
+              echo "Deployment to Production Environment is failed"
+              exit 1
+                break
+              elif [ "$DEPLOY_STATUS" = "DEPLOYED" ]
+                  then
+              echo "DEPLOYMENT to Production Environment is completed successfully"
+                break
+              fi
+               sleep 45
+          done
+          '''
+          }
+        }
+      }
+
+}
+  post {
+    always {
+      emailext attachLog: true, body: '${JELLY_SCRIPT,template="static-analysis"}', mimeType: 'text/html', recipientProviders: [developers(), culprits(), brokenTestsSuspects(), upstreamDevelopers()], subject: 'Production CCv2 | $PROJECT_NAME | $HYBRIS_BUILD_NUM | $BUILD_NUMBER | $BUILD_STATUS ', to: "$MAIL_RECIPIENTS"
+        script {
+          DATE_TAG = java.time.LocalDate.now()
+          DATETIME_TAG = java.time.LocalDateTime.now()
+            }
+            sh "echo ${DATETIME_TAG}"
+          sh script: "echo 'date=${DATETIME_TAG} build_no=${BUILD_ID} Job_name=_${env.JOB_NAME} build_status=${currentBuild.currentResult}' >> /tmp/sap_cloud_file.txt"
+     
+    }
+  
+    unstable {
+        office365ConnectorSend color: "#F8C471", message: "SAP CCV2 Build Unstable ${JOB_NAME} ${BUILD_NUMBER}", status: "unstable", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    failure {
+        office365ConnectorSend color: "#CB4335", message: "SAP CCV2 Build Failed ${JOB_NAME} ${BUILD_NUMBER}", status: "failure", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    success {
+        office365ConnectorSend color: '#1D8348', message: "SAP CCV2 Build Success ${JOB_NAME} ${BUILD_NUMBER}", status: "success", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+
+}
+
+}

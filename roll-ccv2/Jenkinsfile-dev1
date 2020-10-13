@@ -1,0 +1,137 @@
+  pipeline {
+        agent {
+                                node {
+                                label 'pgdev1_1905'
+                                }
+                }
+    options {
+      buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '25', numToKeepStr: '25'))
+      ansiColor('gnome-terminal')
+      disableConcurrentBuilds()
+    }
+    
+    environment {
+          HYBRIS_INSTALL_PATH = "/opt/hybris"
+          config_env = "config-roll-dev1"
+          CHECKOUT_PATH="/data/"
+          EMAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com, ajay.tirumalasetti@publicissapient.com, jaideep.singh@publicissapient.com, sunil.kumar@publicissapient.com, rahul.gupta5@publicissapient.com'
+      }
+
+  parameters {
+      string(defaultValue: 'release-ccv2-1905', description: 'Hybris Code Branch/TAG Name for Checkout', name: 'HYBRIS_BRANCH')
+  } 
+
+    stages {
+                                  stage ('Checkout Hybris Code') {
+          steps {
+              sh 'printf "\\e[35mHybris Code Checkout...\\e[0m\\n"'
+              dir("${env.CHECKOUT_PATH}/roll-hybris") {
+
+            echo "====== Current WORKSPACE Directory is ${env.WORKSPACE} ======="
+            echo "============== GIT Hybris Source Code : ${env.HYBRIS_BRANCH} =============="
+            checkout(
+              [
+                $class: 'GitSCM',
+                branches: [[name: 'origin/${HYBRIS_BRANCH}']],
+                doGenerateSubmoduleConfigurations: false,
+                extensions: [
+                  [$class: 'CheckoutOption', timeout: 120]
+                  ],
+                  submoduleCfg: [],
+                  userRemoteConfigs: [
+                    [
+                      credentialsId: 'gitlab',
+                      url: 'https://gitlab.digitas.com/goodyear/roll-hybris.git'
+                      ]
+                    ]
+                  ],
+                )
+            }
+          }
+      }
+
+          stage ('Setting Hybris Properties') {
+            steps {
+              echo "====== Current WORKSPACE Directory is  ======="
+              echo "====== Setting up Local Properties & updating properties for CI ======"
+                sh '''
+                  # Get into the code repo location
+                  cd ${CHECKOUT_PATH}/roll-hybris
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/config
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/bin/platform/setantenv.sh
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/bin/custom
+                  cp -pr ${CHECKOUT_PATH}/roll-hybris/${config_env} ${HYBRIS_INSTALL_PATH}/hybris/config
+                  cp -pr ${CHECKOUT_PATH}/roll-hybris/${config_env}/customize/platform/setantenv.sh ${HYBRIS_INSTALL_PATH}/hybris/bin/platform/setantenv.sh
+                  cp -pr ${CHECKOUT_PATH}/roll-hybris/custom ${HYBRIS_INSTALL_PATH}/hybris/bin/custom
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/bin/custom/local-ci.properties
+                  chown -R hybris:hybris ${HYBRIS_INSTALL_PATH}
+                '''
+              }
+            }
+
+            stage ('Hybris build and Deploy') {
+          steps {
+              echo "====== Running Hybris Targets - customize, clean and all ======"          
+                sh '''
+                set -x wget --no-check-certificate https://10.211.0.189:9002/admin >>/dev/null 2>>/dev/null
+                if [ $? -eq 0 ]; then
+                    echo "Hybris on `hostname` is UP.. Lets stop it for the Deploy..."
+                    /etc/init.d/hybris stop
+                    sleep 5
+                    /sbin/runuser -l hybris -c 'cd /opt/hybris/hybris/bin/platform;chmod 775 *.sh;. ./setantenv.sh; ant customize; ant clean all;'
+                    sleep 10
+                    /etc/init.d/hybris start
+                fi
+               '''
+            }
+          }
+    
+    stage ('Hybris Admin Console Availability') {
+        steps {
+        sh 'printf "\\e[35mChecking hybris admin console availability...\\e[0m\\n"'
+        sh '''
+        set -x wget --no-check-certificate https://10.211.0.189:9002/admin >>/dev/null 2>>/dev/null
+        if [ $? -eq 0 ]
+        then
+        echo Server `hostname` is UP....
+       # break;
+        else
+        count=`expr $count + 1`
+        if [ $count -gt 4  ]
+        then
+        echo Error :  Please check console on hybris node and logs for errors.
+        exit 99;
+        fi
+        sleep 150
+        continue;
+        fi
+        '''
+        }
+    }
+}
+
+      post {
+        always {
+         emailext attachLog: true, body: '${JELLY_SCRIPT,template="static-analysis"}', mimeType: 'text/html', recipientProviders: [developers(), culprits(), brokenTestsSuspects(), upstreamDevelopers()], subject: 'Build | $PROJECT_NAME | $BUILD_NUMBER | $BUILD_STATUS ', to: "$EMAIL_RECIPIENTS"
+        script {
+          DATE_TAG = java.time.LocalDate.now()
+          DATETIME_TAG = java.time.LocalDateTime.now()
+            }
+            sh "echo ${DATETIME_TAG}"
+          sh script: "echo 'date=${DATETIME_TAG} build_no=${BUILD_ID} Job_name=_${env.JOB_NAME} build_status=${currentBuild.currentResult}' >> /tmp/file.txt"
+     
+    }
+  
+    unstable {
+        office365ConnectorSend color: "#F8C471", message: "Build Unstable ${JOB_NAME} ${BUILD_NUMBER}", status: "unstable", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    failure {
+        office365ConnectorSend color: "#CB4335", message: "Build Failed ${JOB_NAME} ${BUILD_NUMBER}", status: "failure", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    success {
+        office365ConnectorSend color: '#1D8348', message: "Build Success ${JOB_NAME} ${BUILD_NUMBER}", status: "success", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+
+  }
+
+}

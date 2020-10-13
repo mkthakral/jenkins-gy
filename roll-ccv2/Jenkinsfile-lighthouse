@@ -1,0 +1,90 @@
+  pipeline {
+        agent {
+                                node {
+                                label 'pgdev1_1905'
+                                }
+                }
+    options {
+      buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '25', numToKeepStr: '25'))
+      ansiColor('gnome-terminal')
+      disableConcurrentBuilds()
+    }
+    
+    environment {
+          LIGHTHOUSE_REPORT_PATH = "/opt/lighthouse"
+          EMAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com'
+      }
+
+  parameters {
+      string(defaultValue: 'https://dev.rollbygoodyear.com', description: 'URL for the site need to be tested', name: 'URL')
+  } 
+
+    stages {
+    stage ('Check Lighthouse CI Installation') {
+          steps {
+              echo "====== Checking if Lighthouse CI is installed and if not installed then do the installation ======"          
+                sh '''
+                FILE=/root/.nvm/versions/node/v12.18.3/bin/lhci
+                if [ -f "$FILE" ]; then
+                    echo "$FILE exists"
+                else
+                echo "install Lighthouse CI globally"
+                npm install -g @lhci/cli
+                fi
+               '''
+            }
+          }
+
+     stage ('Run Lighthouse') {
+          steps {
+              echo "====== Running Lighthouse CI to generate the report ======"          
+                sh '''
+                /root/.nvm/versions/node/v12.18.3/bin/lhci autorun --config="./roll-ccv2/Lighthouse/lhci-config.json" --collect.url="${URL}" || true
+               '''
+        publishHTML([allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: '.lighthouseci', reportFiles: 'lhr-**.html', reportName: 'Lighthouse Report', reportTitles: ''])
+            }
+        post {
+            always {
+            echo "====== Archiving Artifacts ========"
+            archiveArtifacts artifacts: '.lighthouseci/lhr-**.html', caseSensitive: false, defaultExcludes: false
+            }
+        }
+          }
+   stage('Results') {
+            steps {
+                script {
+                    def logz = currentBuild.rawBuild.getLog(100000);
+                    def result = logz.find { it.contains('Assertion failed. Exiting with status code 1') }
+                    if (result) {
+                        error ('Failing due to ' + result)
+                    }
+                }
+            }
+        }
+}
+
+      post {
+        always {
+         emailext attachLog: true, body: '${JELLY_SCRIPT,template="static-analysis"}', mimeType: 'text/html', recipientProviders: [developers(), culprits(), brokenTestsSuspects(), upstreamDevelopers()], subject: 'Build | $PROJECT_NAME | $BUILD_NUMBER | $BUILD_STATUS ', to: "$EMAIL_RECIPIENTS"
+        script {
+          DATE_TAG = java.time.LocalDate.now()
+          DATETIME_TAG = java.time.LocalDateTime.now()
+            }
+            sh "echo ${DATETIME_TAG}"
+          sh script: "echo 'date=${DATETIME_TAG} build_no=${BUILD_ID} Job_name=_${env.JOB_NAME} build_status=${currentBuild.currentResult}' >> /tmp/file.txt"
+     
+    }
+  
+    unstable {
+        office365ConnectorSend color: "#F8C471", message: "Build Unstable ${JOB_NAME} ${BUILD_NUMBER}", status: "unstable", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    failure {
+        office365ConnectorSend color: "#CB4335", message: "Build Failed ${JOB_NAME} ${BUILD_NUMBER}", status: "failure", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    success {
+        office365ConnectorSend color: '#1D8348', message: "Build Success ${JOB_NAME} ${BUILD_NUMBER}", status: "success", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+
+  }
+
+}

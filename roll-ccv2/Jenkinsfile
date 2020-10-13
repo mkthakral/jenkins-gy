@@ -1,0 +1,220 @@
+  pipeline {
+              agent {
+                  node {
+                    label 'master'
+                      }
+                }
+    options {
+      buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '25', numToKeepStr: '25'))
+      ansiColor('gnome-terminal')
+      disableConcurrentBuilds()
+    }
+    
+    environment {
+          HYBRIS_INSTALL_PATH = "/data/hybris"
+          config_env = "config-roll-dev1"
+          MAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com,Goodyear_MSO_L2_PBS_TEAM_IND@publicissapient.com, jaideep.singh@publicissapient.com, rahul.gupta5@publicissapient.com'
+        //  MAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com'
+          CHECKOUT_PATH="/data/"
+      }
+
+  parameters {
+      string(defaultValue: 'release-ccv2-1905', description: 'Hybris Code Branch/TAG Name for Checkout', name: 'HYBRIS_BRANCH')
+      booleanParam(defaultValue: false, description: 'Select if code need to be deployed to defined environment', name: 'Deploy')
+      choice choices: ['RollDEV1', 'Stage1-Dont-work'], description: 'Config for specific environment', name: 'environment'
+  }
+
+    stages {
+                                  stage ('Checkout Hybris Code') {
+          steps {
+              sh 'printf "\\e[35mHybris Code Checkout...\\e[0m\\n"'
+              dir("${env.CHECKOUT_PATH}/roll-hybris") {
+
+            echo "====== Current WORKSPACE Directory is ${env.WORKSPACE} ======="
+            echo "============== GIT Hybris Source Code : ${env.HYBRIS_BRANCH} =============="
+            checkout(
+              [
+                $class: 'GitSCM',
+                branches: [[name: 'origin/${HYBRIS_BRANCH}']],
+                doGenerateSubmoduleConfigurations: false,
+                extensions: [
+                  [$class: 'CheckoutOption', timeout: 120]
+                  ],
+                  submoduleCfg: [],
+                  userRemoteConfigs: [
+                    [
+                      credentialsId: 'gitlab',
+                      url: 'https://gitlab.digitas.com/goodyear/roll-hybris.git'
+                      ]
+                    ]
+                  ],
+                )
+            }
+          }
+      }
+
+          stage ('Setting Hybris Properties') {
+            steps {
+              echo "====== Current WORKSPACE Directory is  ======="
+              echo "====== Setting up Local Properties & updating properties for CI ======"
+                sh '''
+                  # Get into the code repo location
+                  cd ${CHECKOUT_PATH}/roll-hybris
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/config
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/bin/platform/setantenv.sh
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/bin/custom
+                  cp -pr ${CHECKOUT_PATH}/roll-hybris/${config_env} ${HYBRIS_INSTALL_PATH}/hybris/config
+                  rm -rf ${HYBRIS_INSTALL_PATH}/hybris/config/local.properties
+                  mv ${HYBRIS_INSTALL_PATH}/hybris/config/local-ci.properties ${HYBRIS_INSTALL_PATH}/hybris/config/local.properties
+                  cp -pr ${CHECKOUT_PATH}/roll-hybris/${config_env}/customize/platform/setantenv.sh ${HYBRIS_INSTALL_PATH}/hybris/bin/platform/setantenv.sh
+                  cp -pr ${CHECKOUT_PATH}/roll-hybris/custom ${HYBRIS_INSTALL_PATH}/hybris/bin/custom
+                  cp -pr ${CHECKOUT_PATH}/roll-hybris/${config_env}/customize/platform/resources/ant/lib/jacococli.jar ${HYBRIS_INSTALL_PATH}/hybris/bin/platform/lib/jacococli.jar
+                  
+                  # Sonarqube properties
+                  SONAR_PROJ_VERSION=`echo ${BUILD_NUMBER}`
+                  echo sonar.projectVersion=Build_${SONAR_PROJ_VERSION} >> ${HYBRIS_INSTALL_PATH}/hybris/config/local.properties
+
+
+                '''
+              }
+            }
+
+            stage ('Hybris Code Compilation') {
+          steps {
+              sh 'printf "\\e[35mHybris Code Compile - ant clean all...\\e[0m\\n"'         
+                sh '''
+                cd ${HYBRIS_INSTALL_PATH}/hybris/bin/platform
+                . ./setantenv.sh
+              export JAVA_HOME=/data/hybris/jdk-11.0.7
+                ant customize
+                ant clean all'''
+            }
+          }
+
+              stage ('Hybris JUNIT tenant Initialization') {
+            steps {
+                sh 'printf "\\e[35mRunning ant yunitinit...\\e[0m\\n"'        
+                  sh '''
+                   cd ${HYBRIS_INSTALL_PATH}/hybris/bin/platform
+                    export JAVA_HOME=/data/hybris/jdk-11.0.7
+                    . ./setantenv.sh
+                    ant yunitinit -Dmaven.update.dbdrivers=false '''
+              }
+        }
+    
+      stage ('Hybris JUNIT') {
+
+            steps {
+              sh 'printf "\\e[35mRunning Hybris Junit Tests...\\e[0m\\n"'
+                echo "====== Running JUNIT Hybris Targets ======"        
+                sh '''
+               cd ${HYBRIS_INSTALL_PATH}/hybris/bin/platform
+               export JAVA_HOME=/data/hybris/jdk-11.0.7
+                . ./setantenv.sh
+                ant unittests -Dtestclasses.packages.excluded="de.hybris.*" -Dtestclasses.packages="com.goodyear.*"
+               # ant unittests -Dtestclasses.packages.excluded="de.hybris.*" -Dextensions=gyacceleratorcore,gyacceleratorfacades,gyacceleratorfulfilmentprocess,gyservices,gywebservices,gypromotions
+                '''
+              }
+
+            post {
+                always {
+                    dir('/data/hybris/')
+                    {
+                  jacoco classPattern: '**/custom/**/classes', exclusionPattern: '**/jalo/**/*.class,**/constants/**/*.class,**/dto/**/*.class,**/*DTO.class,**/integ/webservices/**/*.class,**/*Standalone.class,**/gensrc/**/*.class,**/cmscockpit/**/*.class,**/cscockpit/**/*.class,**/productcockpit/**/*.class,**/*Form.java,*/*Controller.java,**/Jalo/**/*.java,**/*Form.java', sourcePattern: '**/custom/**/src'
+                  junit 'hybris/temp/hybris/junit/*.xml'
+                    }             
+                }
+            }   
+          }
+
+      stage ('Jacoco exec to XML') {
+
+            steps {
+              sh 'printf "\\e[35mCreate Jacoco XML using jacococli...\\e[0m\\n"'
+                echo "====== Running JACOCO CLI agent to create the XML ======"        
+                sh '''
+               cd ${HYBRIS_INSTALL_PATH}/hybris/bin/platform
+               export JAVA_HOME=/data/hybris/jdk-11.0.7
+                . ./setantenv.sh
+               cd ${HYBRIS_INSTALL_PATH}/hybris/bin/platform/lib/
+               chmod 777 jacococli.jar
+               java -jar jacococli.jar report /data/hybris/hybris/log/jacoco/reports/jacoco.exec --classfiles "${HYBRIS_INSTALL_PATH}/hybris/bin/custom/gywebservices/classes/" --classfiles "${HYBRIS_INSTALL_PATH}/hybris/bin/custom/gyaccelerator/gyacceleratorcore/classes" --classfiles "${HYBRIS_INSTALL_PATH}/hybris/bin/custom/gyaccelerator/gyacceleratorfacades/classes" --classfiles "${HYBRIS_INSTALL_PATH}/hybris/bin/custom/gyaccelerator/gyacceleratorfulfilmentprocess/classes" --classfiles "${HYBRIS_INSTALL_PATH}/hybris/bin/custom/gypromotions/classes" --xml /data/hybris/hybris/log/jacoco/reports/jacoco.xml
+                '''
+              } 
+          }
+    
+      stage ('Sonar Analysis') {
+            steps {
+              sh 'printf "\\e[35mRunning Sonar Analysis...\\e[0m\\n"'
+                sh '''
+             cd ${HYBRIS_INSTALL_PATH}/hybris/bin/platform
+             export JAVA_HOME=/data/hybris/jdk-11.0.7
+             . ./setantenv.sh
+          ANT_OPTS="-Xmx5G -noverify" ant sonarcheck -Dmaven.update.dbdrivers=false
+                '''
+            }
+          post {
+           success {
+           echo "====== Sonar Job is Successful ========"
+           }
+       }
+      }
+
+       stage ('Hybris Sonar QC') {
+
+        steps {
+           sh 'printf "\\e[35mSonar QC for Hybris as per Sonar way Quality Gate...\\e[0m\\n"'
+           withCredentials([string(credentialsId: 'SONAR', variable: 'SONAR')]) {
+            sh '''
+            sleep 100
+            GATE_STATUS=`curl -u '${SONAR}': http://sonar.goodyear.com/api/qualitygates/project_status?projectKey=RBGY-HYBRIS-1905 | jq '.projectStatus.status' | tr -d '"'`
+            if [ "$GATE_STATUS" = "OK" ]
+            then
+            exit 0
+            elif [ "$GATE_STATUS" = "ERROR" ]
+            then
+            exit 1
+            fi
+            '''
+        }
+        }
+    }
+        stage ('Deploy On environment'){
+        when {
+          expression { return Deploy ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+          }
+        steps {
+           build job: "${environment}",
+           parameters: [string(name: 'HYBRIS_BRANCH', value: "${HYBRIS_BRANCH}")]
+        }
+    }
+
+    }
+    
+      post {
+        always {
+         emailext attachLog: true, body: '${JELLY_SCRIPT,template="static-analysis"}', mimeType: 'text/html', recipientProviders: [developers(), culprits(), brokenTestsSuspects(), upstreamDevelopers()], subject: 'Build | $PROJECT_NAME | $BUILD_NUMBER | $BUILD_STATUS ', to: "$MAIL_RECIPIENTS"
+         createSummary icon: 'star-gold.gif', id: '', text: "HYBRIS CODE REPO: ${HYBRIS_BRANCH}"
+         addShortText background: 'yellow', borderColor: '', color: '', link: '', text: "${HYBRIS_BRANCH}"
+        script {
+          DATE_TAG = java.time.LocalDate.now()
+          DATETIME_TAG = java.time.LocalDateTime.now()
+            }
+            sh "echo ${DATETIME_TAG}"
+          sh script: "echo 'date=${DATETIME_TAG} build_no=${BUILD_ID} Job_name=_${env.JOB_NAME} build_status=${currentBuild.currentResult}' >> /data/hybris/file.txt"
+     
+    }
+  
+    unstable {
+        office365ConnectorSend color: "#F8C471", message: "Build Unstable ${JOB_NAME} ${BUILD_NUMBER}", status: "unstable", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    failure {
+        office365ConnectorSend color: "#CB4335", message: "Build Failed ${JOB_NAME} ${BUILD_NUMBER}", status: "failure", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    success {
+        office365ConnectorSend color: '#1D8348', message: "Build Success ${JOB_NAME} ${BUILD_NUMBER}", status: "success", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+
+}
+
+  }

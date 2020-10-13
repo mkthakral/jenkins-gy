@@ -1,0 +1,187 @@
+pipeline {
+        agent {
+                  node {
+                    label 'master'
+                      }
+                }
+      options {
+    buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '15', numToKeepStr: '15'))
+    ansiColor('xterm')
+    disableConcurrentBuilds()
+  }
+  
+  
+  environment {
+    MAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com,Goodyear_MSO_L2_PBS_TEAM_IND@publicissapient.com, jaideep.singh@publicissapient.com, rahul.gupta5@publicissapient.com'
+    BUILDNUMFILE = '/tmp/buildnumber.txt'
+    DEPLOY_NUM_FILE = '/tmp/deploymentcode.txt'
+  }
+  
+
+    parameters {
+      string(defaultValue: 'BRANCH_or_TAG NAME', description: 'Hybris Code Branch/TAG Name for Checkout', name: 'HYBRIS_BRANCH')
+      string(defaultValue: 'BranchName_Build_id', description: 'Name for SAP Hybris Build', name: 'SAP_BUILD_NAME')
+      booleanParam(defaultValue: false, description: 'Select if code need to be deployed to SAP DEVELOPMENT environment', name: 'DEV_DEPLOY')
+      booleanParam(defaultValue: false, description: 'Select if code need to be deployed to SAP STAGE environment', name: 'STAGE_DEPLOY')
+      choice choices: ['NONE', 'UPDATE', 'INITIALIZE'], description: 'Select the database Update mode for DEVELOPMENT. (i) NONE -> No migration required: Database isn’t altered and no data is imported. (ii) UPDATE -> Migrate data: Database schema is migrated and data is imported. (iii) INITIALIZE -> Initialize database: Database is wiped and data is imported.', name: 'DATABASE_UPDATE_MODE'
+      choice choices: ['ROLLING_UPDATE', 'RECREATE'], description: 'Selet the Deployment Strategy. (1) Rolling update creates an additional deployment alongside the primary one, routes traffic to it and finally removes the previous one. This way, your site is always available. (2) 1Recreate shuts down the running deployment and creates a new one based on a selected build. The site is unavailable to your customers during this time.', name: 'DEPLOYMENT_STRATEGY'
+  }
+
+    stages {
+      stage ('Build Hybris Code on SAP Cloud') {
+          steps {
+            sh 'printf "\\e[35mRun Hybris Code Build to SAP CLOUD...\\e[0m\\n"'
+            withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+              sh '''
+                /usr/bin/curl -s --location --request POST 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/builds'  --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' --data '{ "branch": "'${HYBRIS_BRANCH}'", "name": "'${SAP_BUILD_NAME}'"}' >${BUILDNUMFILE}
+            '''
+                }
+            }
+        }
+
+      stage ('Check the hybris Build status') {
+        steps {
+          sh 'printf "\\e[35mLets Check Hybris Code Build Status on SAP CLOUD...\\e[0m\\n"'
+          withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+          sh '''
+          while true
+            do
+            BUILDNUM=`cat ${BUILDNUMFILE} | awk -F'"' '{print $8}'`
+            STATUS=`/usr/bin/curl -s --location --request GET 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/builds/'${BUILDNUM}'/progress' --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' | awk -F, '{print $6}' | awk -F'"' '{print $4}'`
+              if [ "$STATUS" = "BUILDING" ] || [ "$STATUS" = "UNKNOWN" ];
+                  then
+                echo "Build is STARTED and in PROGRESS"
+              elif [ "$STATUS" = "FAIL" ] || [ -z "$STATUS" ]
+                  then
+              echo "SAP Build ${BUILDNUM} is failed"
+              exit 1
+                break
+              else
+              echo "BUILD is completed successfully"
+                break
+              fi
+              sleep 20
+          done
+          '''
+          }
+        }
+      }
+
+    stage ('Deploy On CCV2 DEVELOPMENT'){
+        when {
+          expression { return DEV_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+          }
+        steps {
+          sh 'printf "\\e[35mLets Check Hybris Code Build Status on SAP CLOUD...\\e[0m\\n"'
+          withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+          sh '''
+          BUILDNUM=`cat ${BUILDNUMFILE} | awk -F'"' '{print $8}'`
+          /usr/bin/curl -s --location --request POST 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/deployments' --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' --data '{ "buildCode": "'${BUILDNUM}'", "databaseUpdateMode": "'${DATABASE_UPDATE_MODE}'", "environmentCode": "d1", "strategy": "'${DEPLOYMENT_STRATEGY}'" }' >${DEPLOY_NUM_FILE}
+          '''
+          }
+        }
+    }
+
+          stage ('SAP CCV2 Deployment status on DEV Environment') {
+            when {
+          expression { return DEV_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+          }
+        steps {
+          sh 'printf "\\e[35mLets Deploy Hybris Code on CCV2 DEVELOPMENT Environment...\\e[0m\\n"'
+          withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+          sh '''
+          while true
+            do
+            DEPLOYNUM=`cat ${DEPLOY_NUM_FILE} | awk -F'"' '{print $8}'`
+            DEPLOY_STATUS=`/usr/bin/curl -s --location --request GET 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/deployments/'${DEPLOYNUM}'/progress' --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' | awk -F'"' '{print $12}'`
+              if [ "$DEPLOY_STATUS" = "DEPLOYING" ];
+                  then
+                echo "Deployment to DEV Environment is STARTED and IN-PROGRESS"
+              elif [ "$DEPLOY_STATUS" = "FAIL" ] || [ -z "$DEPLOY_STATUS"]
+                  then
+              echo "Deployment to DEV Environment is failed"
+              exit 1
+                break
+              elif [ "$DEPLOY_STATUS" = "DEPLOYED" ]
+                  then
+              echo "DEPLOYMENT to DEV Environment is completed successfully"
+                break
+              fi
+               sleep 20
+          done
+          '''
+          }
+        }
+      }
+    stage ('Deploy On CCV2 STAGE Environment'){
+        when {
+          expression { return STAGE_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+          }
+        steps {
+          sh 'printf "\\e[35mLets Check Hybris Code Build Status on SAP CLOUD...\\e[0m\\n"'
+          withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+          sh '''
+          BUILDNUM=`cat ${BUILDNUMFILE} | awk -F'"' '{print $8}'`
+          /usr/bin/curl -s --location --request POST 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/deployments' --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' --data '{ "buildCode": "'${BUILDNUM}'", "databaseUpdateMode": "'${DATABASE_UPDATE_MODE}'", "environmentCode": "s1", "strategy": "'${DEPLOYMENT_STRATEGY}'" }' >${DEPLOY_NUM_FILE}
+          '''
+          }
+        }
+    }
+
+          stage ('SAP CCV2 Deployment status on STAGE Environment') {
+            when {
+          expression { return STAGE_DEPLOY ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ }
+          }
+        steps {
+          sh 'printf "\\e[35mLets Deploy Hybris Code on CCV2 STAGE Environment...\\e[0m\\n"'
+          withCredentials([string(credentialsId: 'SAP_TOKEN', variable: 'SAP_TOKEN')]) {
+          sh '''
+          while true
+            do
+            DEPLOYNUM=`cat ${DEPLOY_NUM_FILE} | awk -F'"' '{print $8}'`
+            DEPLOY_STATUS=`/usr/bin/curl -s --location --request GET 'https://portalrotapi.hana.ondemand.com/v2/subscriptions/5eec484e8e84462f9fed545324b2d76d/deployments/'${DEPLOYNUM}'/progress' --header 'Content-Type: application/json' --header 'Authorization: Bearer '${SAP_TOKEN}'' | awk -F'"' '{print $12}'`
+              if [ "$DEPLOY_STATUS" = "DEPLOYING" ];
+                  then
+                echo "Deployment to STAGE Environment is STARTED and IN-PROGRESS"
+              elif [ "$DEPLOY_STATUS" = "FAIL" ] || [ -z "$DEPLOY_STATUS" ]
+                  then
+              echo "Deployment to STAGE Environment is failed"
+              exit 1
+                break
+              elif [ "$DEPLOY_STATUS" = "DEPLOYED" ]
+                  then
+              echo "DEPLOYMENT to STAGE Environment is completed successfully"
+                break
+              fi
+               sleep 20
+          done
+          '''
+          }
+        }
+      }
+}
+  post {
+    always {
+      emailext attachLog: true, body: '${JELLY_SCRIPT,template="static-analysis"}', mimeType: 'text/html', recipientProviders: [developers(), culprits(), brokenTestsSuspects(), upstreamDevelopers()], subject: 'Build | $PROJECT_NAME | $BUILD_NUMBER | $BUILD_STATUS ', to: "$MAIL_RECIPIENTS"
+        script {
+          DATE_TAG = java.time.LocalDate.now()
+          DATETIME_TAG = java.time.LocalDateTime.now()
+            }
+            sh "echo ${DATETIME_TAG}"
+          sh script: "echo 'date=${DATETIME_TAG} build_no=${BUILD_ID} Job_name=_${env.JOB_NAME} build_status=${currentBuild.currentResult}' >> /tmp/sap_cloud_file.txt"
+     
+    }
+  
+    unstable {
+        office365ConnectorSend color: "#F8C471", message: "SAP CCV2 Build Unstable ${JOB_NAME} ${BUILD_NUMBER}", status: "unstable", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    failure {
+        office365ConnectorSend color: "#CB4335", message: "SAP CCV2 Build Failed ${JOB_NAME} ${BUILD_NUMBER}", status: "failure", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+    success {
+        office365ConnectorSend color: '#1D8348', message: "SAP CCV2 Build Success ${JOB_NAME} ${BUILD_NUMBER}", status: "success", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+    }
+
+}
+
+}

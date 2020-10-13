@@ -1,0 +1,183 @@
+pipeline {
+        agent {
+            node {
+            label 'master'
+                }
+            }
+
+     tools { nodejs "nodejs10" }
+
+    options {
+      buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '25', numToKeepStr: '25'))
+      ansiColor('gnome-terminal')
+      disableConcurrentBuilds()
+    }
+    
+    environment {
+          CODE_PATH="/data/"
+          EMAIL_RECIPIENTS = 'mayuresh.bhardwaj@publicissapient.com'
+      }
+
+  parameters {
+      string(defaultValue: 'release-ccv2', description: 'Frontend Code Branch/TAG Name for Checkout', name: 'FRONTEND_BRANCH')
+      choice choices: ['Roll_Frontend_DEV1_CCCV2_DEPLOY', 'Stage-Coming-Soon'], description: 'Config for specific environment', name: 'environment'
+
+  }    
+
+    stages {
+                    stage ('Checkout Frontend Code') {
+          steps {
+              sh 'printf "\\e[35mFrontend Code Checkout.....\\e[0m\\n"'
+              dir("${env.WORKSPACE}/roll-frontend") {
+
+            echo "====== Current WORKSPACE Directory is ${env.WORKSPACE} ======="
+            echo "============== GIT Frontend Source Code : ${env.FRONTEND_BRANCH} =============="
+            checkout(
+              [
+                $class: 'GitSCM',
+                branches: [[name: 'origin/${FRONTEND_BRANCH}']],
+                doGenerateSubmoduleConfigurations: false,
+                extensions: [
+                  [$class: 'CheckoutOption', timeout: 120]
+                  ],
+                  submoduleCfg: [],
+                  userRemoteConfigs: [
+                    [
+                      credentialsId: 'gitlab',
+                      url: 'https://gitlab.digitas.com/goodyear/roll-frontend.git'
+                      ]
+                    ]
+                  ],
+                )
+            }
+          }
+      }
+
+    stage ('NPM MODULES INSTALL') {
+          steps {
+              echo "====== Running npm INSTALL TO install the modules ======"          
+                sh '''
+                cd ${WORKSPACE}/roll-frontend
+                npm install
+               '''
+            }
+          }
+        stage("NPM Lint and SAASlint") {
+		parallel {
+            stage ('NPM lint') {
+          steps {
+              catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              echo "====== Running npm INSTALL TO install the modules ======"          
+                sh '''
+                cd ${WORKSPACE}/roll-frontend
+                npm run lint
+               '''
+            }
+          }
+      post {
+          always {
+          publishHTML([allowMissing: false, alwaysLinkToLastBuild: true, keepAll: true, reportDir: '/data/jenkins/jobs/Rollccv2/jobs/Roll_Frontend_CI/workspace', reportFiles: 'report-eslint.html', reportName: 'esLint Report', reportTitles: ''])
+                }
+            }
+          }
+ 
+     stage ('NPM lint Style') {
+          steps {
+              catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+              echo "====== Running npm lint style ======"          
+                sh '''
+                cd ${WORKSPACE}/roll-frontend
+                npm run lint:style
+               '''
+            }
+          }
+      post {
+          always {
+          publishHTML([allowMissing: false, alwaysLinkToLastBuild: true, keepAll: true, reportDir: '/data/jenkins/jobs/Rollccv2/jobs/Roll_Frontend_CI/workspace', reportFiles: 'report-style-eslint.html', reportName: 'esLint style Report', reportTitles: ''])
+                }
+            }
+          }
+        }
+    }
+
+    stage ('NPM BUILD') {
+          steps {
+              echo "====== Running npm build ======"          
+                sh '''
+                cd ${WORKSPACE}/roll-frontend
+                npm run build
+               '''
+            }
+          }
+    
+stage('Sonarqube Analysis') {
+          environment {
+             scannerHome = tool 'Goodyearsonarscanner'
+            }
+          steps {
+                withSonarQubeEnv('gysonar') {
+                withCredentials([string(credentialsId: 'SONAR', variable: 'SONAR')]) {
+                sh '''
+                ${scannerHome}/bin/sonar-scanner -X \
+                -Dsonar.host.url="http://sonar.goodyear.com" \
+                -Dsauth_token="${SONAR}" \
+                -Dsonar.sources="." \
+                -Dsexclusions="node_modules/**, stylelint-report.html, report-eslint.html, report-eslint.json" \
+                -Dsonar.eslint.reportPaths="report-eslint.json" \
+                -Dsonar.coverage.exclusions="node_modules/**" \
+                -Dsonar.projectVersion="FRONTEND_BUILD_`echo ${BUILD_NUMBER}`" \
+                -DsprojectName="ROLLBY_FRONTEND" \
+                -Dsonar.sourceEncoding="UTF-8" \
+                -Dsonar.projectKey="ROLL_FRONTEND" \
+                -DsprojectBaseDir="${workspace}" \
+                -Dsonar.javascript.lcov.reportPaths="coverage/lcov.info"
+                '''
+        }
+                }
+    }
+  }
+       stage ('Frontend Sonar QC') {
+
+        steps {
+           sh 'printf "\\e[35mSonar QC for Frontend as per Sonar way Quality Gate...\\e[0m\\n"'
+           withCredentials([string(credentialsId: 'SONAR', variable: 'SONAR')]) {
+            sh '''
+            sleep 60
+            GATE_STATUS=`curl -s -u '${SONAR}': http://sonar.goodyear.com/api/qualitygates/project_status?projectKey=ROLL_FRONTEND | jq '.projectStatus.status' | tr -d '"'`
+            if [ "$GATE_STATUS" = "OK" ]
+            then
+            exit 0
+            elif [ "$GATE_STATUS" = "ERROR" ]
+            then
+            exit 1
+            fi
+            '''
+        }
+        }
+    }
+
+}
+    post {
+      always {
+       emailext attachLog: true, body: '${JELLY_SCRIPT,template="static-analysis"}', mimeType: 'text/html', recipientProviders: [developers(), culprits(), brokenTestsSuspects(), upstreamDevelopers()], subject: 'Build | $PROJECT_NAME | $BUILD_NUMBER | $BUILD_STATUS ', to: "$EMAIL_RECIPIENTS"
+      script {
+        DATE_TAG = java.time.LocalDate.now()
+        DATETIME_TAG = java.time.LocalDateTime.now()
+          }
+          sh "echo ${DATETIME_TAG}"
+        sh script: "echo 'date=${DATETIME_TAG} build_no=${BUILD_ID} Job_name=_${env.JOB_NAME} build_status=${currentBuild.currentResult}' >> /tmp/file.txt"
+ 
+  }
+
+  unstable {
+      office365ConnectorSend color: "#F8C471", message: "Build Unstable ${JOB_NAME} ${BUILD_NUMBER}", status: "unstable", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+  }
+  failure {
+      office365ConnectorSend color: "#CB4335", message: "Build Failed ${JOB_NAME} ${BUILD_NUMBER}", status: "failure", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+  }
+  success {
+      office365ConnectorSend color: '#1D8348', message: "Build Success ${JOB_NAME} ${BUILD_NUMBER}", status: "success", webhookUrl: "https://outlook.office.com/webhook/b1ca5fca-f9e2-4a71-9ad3-7bd3d2155acc@d52c9ea1-7c21-47b1-82a3-33a74b1f74b8/JenkinsCI/a828f7ab2f9b47cfb64eac642569bd02/5ee1482a-0472-438b-9656-ec2763de76ab"
+  }
+}
+
+}
