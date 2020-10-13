@@ -5,6 +5,8 @@ def stopServer(String environment) {
     String osName = new utility().getOS();
     println "OS Name: " + osName
 
+    def request = libraryResource environment + '.properties'
+    println request
     Properties props = new Properties()
     File propsFile = new File('./conf/' + environment + '.properties')
     props.load(propsFile.newDataInputStream())
