@@ -1,6 +1,6 @@
 library identifier: 'custom-lib@master', retriever: modernSCM(
   [$class: 'GitSCMSource',
-   remote: 'git@github.com:mkthakral/jenkins-gy.git'])
+   remote: 'https://github.com/mkthakral/jenkins-gy.git'])
 
 node{
     stage('StopHybris') {
