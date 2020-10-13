@@ -1,6 +1,6 @@
 import com.gy.stopHybris
 
-def call(String environment) {
+def call(Map params) {
     def builder = new stopHybris();
-    builder.stopHybris(environment);
+    builder.stopHybris(params.environment);
   }
