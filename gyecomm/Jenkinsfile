@@ -1,4 +1,4 @@
-@Library('pipeline-library-gy/gyecomm')_
+@Library('pipeline-library-gy')_
 
 node{
     stage('StopHybris') {
