@@ -2,7 +2,7 @@
 
 node{
     stage('StopHybris') {
-        stopHybris(
+        stopHybris1(
             environment: "${env.environment}"
         ) 
     }
