@@ -7,7 +7,7 @@ node{
         )
     stage('Checkout'){
         gitClone1(
-            branch: "${env.branch}"
+            branch: "${env.branch}",
             repoURL: "https://gitlab.digitas.com/goodyear/goodyear-ecommerce.git"
             )
     }
