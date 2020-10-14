@@ -11,7 +11,7 @@ def cloneRepository(String branchName, String repoURL) {
         checkout([
             $class: 'GitSCM',
             branches: [[name:  branchName ]],
-            userRemoteConfigs: [[ credentialsId: "gitlab2", url: repoURL ]]
+            userRemoteConfigs: [[ credentialsId: "gitlab", url: repoURL ]]
         ])
     }
 }
